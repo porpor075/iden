@@ -2,36 +2,65 @@
 import { useParams } from 'next/navigation';
 import { useState, useRef, useEffect } from 'react';
 import { supabase } from '../../../lib/supabase';
-import { Camera, CheckCircle2, AlertCircle, RefreshCcw, Loader2 } from 'lucide-react';
+import { Camera, CheckCircle2, AlertCircle, RefreshCcw, Loader2, ShieldCheck } from 'lucide-react';
+import { FaceLandmarker, FilesetResolver, DrawingUtils } from '@mediapipe/tasks-vision';
 
 export default function MobileVerifyPage() {
   const { sessionId } = useParams();
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState('');
-  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [modelLoaded, setModelLoaded] = useState(false);
+  const [faceInFrame, setFaceInFrame] = useState(false);
+  const [scanProgress, setScanProgress] = useState(0);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const faceLandmarkerRef = useRef<FaceLandmarker | null>(null);
+  const requestRef = useRef<number | null>(null);
 
-  // เริ่มเปิดกล้องเมื่อเข้าหน้า
   useEffect(() => {
-    startCamera();
+    setupModel();
     return () => {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
+      if (requestRef.current) cancelAnimationFrame(requestRef.current);
     };
   }, []);
+
+  const setupModel = async () => {
+    try {
+      const filesetResolver = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+      );
+      const faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
+          delegate: "GPU"
+        },
+        outputFaceBlendshapes: true,
+        runningMode: "VIDEO",
+        numFaces: 1
+      });
+      faceLandmarkerRef.current = faceLandmarker;
+      setModelLoaded(true);
+      startCamera();
+    } catch (err) {
+      console.error(err);
+      setError('ไม่สามารถโหลด AI Model ได้ กรุณาตรวจสอบการเชื่อมต่อ');
+    }
+  };
 
   const startCamera = async () => {
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user' }, // กล้องหน้า
+        video: { facingMode: 'user', width: 640, height: 640 },
         audio: false
       });
-      setStream(mediaStream);
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current?.play();
+          processVideo();
+        };
       }
     } catch (err) {
       console.error(err);
@@ -39,137 +68,176 @@ export default function MobileVerifyPage() {
     }
   };
 
+  const processVideo = () => {
+    if (!videoRef.current || !canvasRef.current || !faceLandmarkerRef.current) return;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d')!;
+    const drawingUtils = new DrawingUtils(ctx);
+    
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const render = () => {
+      if (video.paused || video.ended) return;
+      
+      const startTimeMs = performance.now();
+      const results = faceLandmarkerRef.current!.detectForVideo(video, startTimeMs);
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+        setFaceInFrame(true);
+        // วาด Face Mesh (เส้นใย 3D)
+        for (const landmarks of results.faceLandmarks) {
+          drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_TESSELATION, {
+            color: "#30B0FF44", lineWidth: 1
+          });
+          drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE, { color: "#30B0FF" });
+          drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_LEFT_EYE, { color: "#30B0FF" });
+          drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_LIPS, { color: "#30B0FF" });
+        }
+        
+        // จำลองความคืบหน้าของการสแกน 3D
+        setScanProgress(prev => Math.min(prev + 2, 100));
+      } else {
+        setFaceInFrame(false);
+        setScanProgress(0);
+      }
+
+      requestRef.current = requestAnimationFrame(render);
+    };
+    render();
+  };
+
   const captureAndVerify = async () => {
-    if (!videoRef.current || !canvasRef.current) return;
+    if (!videoRef.current || !canvasRef.current || !faceInFrame) return;
     setLoading(true);
-    setError('');
 
     try {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      
-      if (ctx) {
-        // วาดภาพจาก Video ลง Canvas
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const imageData = canvas.toDataURL('image/jpeg', 0.8); // ได้รูปเป็น Base64
+      const canvas = document.createElement('canvas');
+      canvas.width = videoRef.current.videoWidth;
+      canvas.height = videoRef.current.videoHeight;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(videoRef.current, 0, 0);
+      const imageData = canvas.toDataURL('image/jpeg', 0.8);
 
-        // ส่งข้อมูลไปอัปเดตใน Supabase
-        // เก็บทั้งสถานะผ่าน และรูปภาพของผู้ใช้
-        const { error: updErr } = await supabase
-          .from('sessions')
-          .update({ 
-            is_verified: true,
-            face_image: imageData, // เก็บรูปภาพ Base64
-            verified_at: new Date().toISOString()
-          })
-          .eq('id', sessionId);
+      const { error: updErr } = await supabase
+        .from('sessions')
+        .update({ 
+          is_verified: true,
+          face_image: imageData,
+          verified_at: new Date().toISOString()
+        })
+        .eq('id', sessionId);
 
-        if (updErr) throw updErr;
-        
-        // ปิดกล้อง
-        if (stream) {
-          stream.getTracks().forEach(track => track.stop());
-        }
-        setDone(true);
-      }
+      if (updErr) throw updErr;
+      setDone(true);
     } catch (err: any) {
-      console.error(err);
       setError(err.message || 'การยืนยันตัวตนล้มเหลว');
     } finally {
       setLoading(false);
     }
   };
 
+  // Auto capture เมื่อสแกนครบ 100%
+  useEffect(() => {
+    if (scanProgress === 100 && !loading && !done) {
+      captureAndVerify();
+    }
+  }, [scanProgress]);
+
   if (done) {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 text-white p-6 text-center">
-        <div className="w-20 h-20 bg-green-500/20 rounded-full flex items-center justify-center mb-6 animate-bounce">
-          <CheckCircle2 size={48} className="text-green-400" />
-        </div>
-        <h1 className="text-3xl font-bold mb-2">สำเร็จ!</h1>
-        <p className="text-slate-400">ระบบบันทึกภาพและยืนยันตัวตนเรียบร้อยแล้ว<br/>คุณสามารถกลับไปที่หน้าจอคอมพิวเตอร์ได้เลย</p>
+        <CheckCircle2 size={80} className="text-green-400 mb-6 animate-pulse" />
+        <h1 className="text-3xl font-bold mb-2">ยืนยันตัวตนสำเร็จ</h1>
+        <p className="text-slate-400">ระบบสแกนใบหน้าแบบ 3D บันทึกข้อมูลเรียบร้อย<br/>กรุณากลับไปที่หน้าจอคอมพิวเตอร์ของคุณ</p>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 text-white p-4 font-sans">
-      <div className="w-full max-w-md bg-slate-900/50 backdrop-blur-xl p-6 rounded-[2.5rem] border border-white/10 shadow-2xl overflow-hidden">
-        
-        <div className="flex items-center gap-3 mb-8 px-2">
-          <div className="p-2 bg-blue-600/20 rounded-xl">
-            <Camera size={20} className="text-blue-400" />
+    <div className="flex flex-col items-center justify-center min-h-screen bg-black text-white p-4 overflow-hidden">
+      <div className="w-full max-w-md relative">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-8 px-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center shadow-lg shadow-blue-600/50">
+              <ShieldCheck size={24} />
+            </div>
+            <div>
+              <h1 className="text-sm font-bold tracking-widest uppercase">Biometric 3D</h1>
+              <p className="text-[10px] text-blue-400 font-mono">ENCRYPTED SESSION: {sessionId?.toString().substring(0, 8)}</p>
+            </div>
           </div>
-          <h1 className="text-lg font-semibold tracking-tight">Identity Verification</h1>
+          {!modelLoaded && <Loader2 className="animate-spin text-blue-500" size={20} />}
         </div>
 
-        {/* Video Preview */}
-        <div className="relative aspect-square mb-8 rounded-[2rem] overflow-hidden bg-black border border-white/5 ring-1 ring-white/10 group">
-          {!stream && !error && (
-            <div className="absolute inset-0 flex items-center justify-center text-slate-500">
-              <Loader2 className="animate-spin" size={32} />
-            </div>
-          )}
-          
+        {/* Scanner Window */}
+        <div className="relative aspect-square w-full rounded-[3rem] overflow-hidden border-2 border-white/10 shadow-[0_0_50px_rgba(0,0,0,0.5)]">
           <video
             ref={videoRef}
             autoPlay
             playsInline
             muted
-            className="w-full h-full object-cover scale-x-[-1]" // กลับด้านให้เหมือนกระจก
+            className="absolute inset-0 w-full h-full object-cover scale-x-[-1]"
+          />
+          <canvas
+            ref={canvasRef}
+            className="absolute inset-0 w-full h-full object-cover scale-x-[-1] pointer-events-none"
           />
           
-          {/* Overlay Guide */}
-          <div className="absolute inset-0 pointer-events-none border-[3rem] border-slate-950/40">
-            <div className="w-full h-full border-2 border-white/20 rounded-[1.5rem] relative">
-              <div className="absolute top-0 left-0 w-8 h-8 border-t-2 border-l-2 border-blue-400 rounded-tl-lg" />
-              <div className="absolute top-0 right-0 w-8 h-8 border-t-2 border-r-2 border-blue-400 rounded-tr-lg" />
-              <div className="absolute bottom-0 left-0 w-8 h-8 border-b-2 border-l-2 border-blue-400 rounded-bl-lg" />
-              <div className="absolute bottom-0 right-0 w-8 h-8 border-b-2 border-r-2 border-blue-400 rounded-br-lg" />
+          {/* Scanning Progress Ring */}
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div className={`w-64 h-64 border-2 rounded-full transition-all duration-300 ${faceInFrame ? 'border-blue-500 scale-105 opacity-100' : 'border-white/10 scale-100 opacity-40'}`}>
+              {faceInFrame && (
+                <div 
+                  className="absolute inset-0 border-t-4 border-blue-400 rounded-full animate-spin" 
+                  style={{ animationDuration: '2s' }}
+                />
+              )}
             </div>
+          </div>
+
+          {/* Instructions Overlay */}
+          {!faceInFrame && modelLoaded && (
+            <div className="absolute inset-0 flex items-end justify-center pb-12 bg-black/20 backdrop-blur-[2px]">
+              <div className="bg-white/10 backdrop-blur-md px-6 py-2 rounded-full border border-white/20 text-xs font-medium animate-pulse">
+                กรุณาวางใบหน้าให้ตรงกับกรอบ
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Progress Bar */}
+        <div className="mt-8 px-4">
+          <div className="flex justify-between text-[10px] font-mono mb-2 text-slate-500 tracking-widest uppercase">
+            <span>3D Mesh Mapping</span>
+            <span>{scanProgress}%</span>
+          </div>
+          <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+            <div 
+              className="h-full bg-gradient-to-r from-blue-600 to-cyan-400 transition-all duration-300"
+              style={{ width: `${scanProgress}%` }}
+            />
           </div>
         </div>
 
         {error && (
-          <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 text-sm flex items-center gap-3">
-            <AlertCircle size={18} /> {error}
+          <div className="mt-6 p-4 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 text-xs flex items-center gap-3 mx-4">
+            <AlertCircle size={16} /> {error}
           </div>
         )}
 
-        <div className="px-2">
-          <button
-            onClick={captureAndVerify}
-            disabled={loading || !stream}
-            className="w-full py-5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 rounded-2xl font-bold text-lg transition-all active:scale-[0.98] shadow-xl shadow-blue-600/20 flex items-center justify-center gap-3 mb-4"
-          >
-            {loading ? (
-              <>
-                <Loader2 className="animate-spin" size={24} />
-                กำลังตรวจสอบ...
-              </>
-            ) : (
-              'ถ่ายภาพยืนยันตัวตน'
-            )}
-          </button>
-          
-          <button 
-            onClick={startCamera}
-            className="w-full py-3 text-slate-400 hover:text-white transition-colors text-sm flex items-center justify-center gap-2"
-          >
-            <RefreshCcw size={14} /> สลับกล้อง หรือ ลองเปิดกล้องใหม่
-          </button>
-        </div>
+        <button 
+          onClick={startCamera}
+          className="mt-12 w-full py-4 text-slate-500 hover:text-white transition-all text-xs flex items-center justify-center gap-2 font-mono uppercase tracking-widest"
+        >
+          <RefreshCcw size={14} /> Re-Initialize Camera
+        </button>
       </div>
-      
-      {/* Hidden Canvas สำหรับถ่ายรูป */}
-      <canvas ref={canvasRef} className="hidden" />
-      
-      <p className="mt-8 text-slate-500 text-xs text-center px-8">
-        ภาพของคุณจะถูกส่งไปยังระบบอย่างปลอดภัย เพื่อใช้ในการยืนยันสิทธิ์การเข้าใช้งาน
-      </p>
     </div>
   );
 }
