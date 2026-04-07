@@ -2,177 +2,216 @@
 import { useEffect, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { supabase } from '../lib/supabase';
-import { ShieldCheck, Smartphone, Loader2, CheckCircle2, User, Fingerprint } from 'lucide-react';
+import { 
+  ShieldCheck, Smartphone, Loader2, CheckCircle2, 
+  User, Fingerprint, Search, UserPlus, Users, 
+  History, ArrowLeft, RefreshCcw, Camera
+} from 'lucide-react';
+
+type AppUser = {
+  user_id: string;
+  full_name: string;
+  baseline_image: string;
+  created_at: string;
+};
 
 export default function DesktopPage() {
-  const [sessionId] = useState(`sess_${Math.random().toString(36).substring(2, 9)}`);
+  const [view, setView] = useState<'dashboard' | 'session'>('dashboard');
+  const [users, setUsers] = useState<AppUser[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState('');
+  const [isNewUser, setIsNewUser] = useState(false);
+  
+  const [sessionId, setSessionId] = useState('');
   const [status, setStatus] = useState<'waiting' | 'verified'>('waiting');
+  const [baselineImage, setBaselineImage] = useState<string | null>(null);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
-  const [verifiedAt, setVerifiedAt] = useState<string | null>(null);
   const [baseUrl, setBaseUrl] = useState('');
 
   useEffect(() => {
     setBaseUrl(window.location.origin);
+    fetchUsers();
+  }, []);
+
+  const fetchUsers = async () => {
+    const { data } = await supabase.from('users').select('*').order('created_at', { ascending: false });
+    if (data) setUsers(data);
+  };
+
+  const startNewEnrollment = () => {
+    const newId = prompt('กรุณาระบุ User ID ใหม่ (เช่น 001):');
+    if (!newId) return;
     
-    // 1. สร้าง Session ใน Supabase รอไว้ก่อน
-    const createInitialSession = async () => {
-      await supabase.from('sessions').insert([{ 
-        id: sessionId, 
-        is_verified: false,
-        created_at: new Date().toISOString()
-      }]);
-    };
-    createInitialSession();
+    // เช็กว่าซ้ำไหม
+    if (users.find(u => u.user_id === newId)) {
+      alert('User ID นี้มีในระบบแล้ว!');
+      return;
+    }
 
-    // 2. รอฟังการอัปเดตข้อมูลแบบ Real-time
+    setupSession(newId, true);
+  };
+
+  const startVerification = (user: AppUser) => {
+    setBaselineImage(user.baseline_image);
+    setupSession(user.user_id, false);
+  };
+
+  const setupSession = async (id: string, isNew: boolean) => {
+    const newSessId = `sess_${Math.random().toString(36).substring(2, 9)}`;
+    setSessionId(newSessId);
+    setSelectedUserId(id);
+    setIsNewUser(isNew);
+    setStatus('waiting');
+    setCapturedImage(null);
+    setView('session');
+
+    // สร้าง Session ใน Database
+    await supabase.from('sessions').insert([{ id: newSessId, user_id: id, is_verified: false }]);
+
+    // ฟังผล Real-time
     const channel = supabase
-      .channel(`session-${sessionId}`)
+      .channel(`session-${newSessId}`)
       .on('postgres_changes', 
-        { 
-          event: 'UPDATE', 
-          schema: 'public', 
-          table: 'sessions', 
-          filter: `id=eq.${sessionId}` 
-        }, 
+        { event: 'UPDATE', schema: 'public', table: 'sessions', filter: `id=eq.${newSessId}` }, 
         async (payload) => {
-          console.log('Real-time update detected, fetching full record...');
-          // เมื่อมีการอัปเดต ให้ดึงข้อมูลใหม่ทั้งหมดอีกครั้งเพื่อเลี่ยงปัญหา Payload ขนาดใหญ่
-          const { data } = await supabase
-            .from('sessions')
-            .select('*')
-            .eq('id', sessionId)
-            .single();
-
-          if (data && data.is_verified) {
-            setCapturedImage(data.face_image);
-            setVerifiedAt(data.verified_at);
-            setStatus('verified');
+          if (payload.new.is_verified) {
+            const { data } = await supabase.from('sessions').select('*').eq('id', newSessId).single();
+            if (data) {
+              setCapturedImage(data.face_image);
+              if (isNew) {
+                await supabase.from('users').insert([{ user_id: id, baseline_image: data.face_image }]);
+                fetchUsers();
+              }
+              setStatus('verified');
+            }
           }
         }
       ).subscribe();
+  };
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [sessionId]);
+  // --- UI Views ---
 
-  // หน้าจอเมื่อยืนยันตัวตนสำเร็จ
-  if (status === 'verified') {
+  if (view === 'dashboard') {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 text-white p-4 font-sans">
-        <div className="max-w-md w-full bg-slate-900/50 backdrop-blur-2xl p-10 rounded-[3rem] border border-green-500/20 shadow-[0_0_100px_rgba(34,197,94,0.1)] text-center relative overflow-hidden">
-          
-          <div className="absolute top-0 right-0 p-8 opacity-10">
-             <ShieldCheck size={120} className="text-green-500" />
+      <div className="min-h-screen bg-slate-950 text-white p-8 font-sans">
+        <div className="max-w-6xl mx-auto">
+          {/* Top Bar */}
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-12">
+            <div>
+              <h1 className="text-4xl font-extrabold tracking-tight mb-2 flex items-center gap-3">
+                <Users className="text-blue-500" size={40} />
+                User Management
+              </h1>
+              <p className="text-slate-500 font-medium">จัดการและตรวจสอบใบหน้าผู้ใช้งานในระบบทั้งหมด</p>
+            </div>
+            <button 
+              onClick={startNewEnrollment}
+              className="flex items-center gap-2 px-6 py-4 bg-blue-600 hover:bg-blue-500 rounded-2xl font-bold transition-all shadow-lg shadow-blue-600/20 active:scale-95"
+            >
+              <UserPlus size={20} /> ลงทะเบียนผู้ใช้ใหม่
+            </button>
           </div>
 
-          <div className="relative z-10">
-            <div className="w-20 h-20 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-8 shadow-lg shadow-green-500/20">
-              <CheckCircle2 size={40} className="text-green-400" />
-            </div>
-
-            <h1 className="text-3xl font-bold mb-2 bg-gradient-to-r from-green-400 to-emerald-500 bg-clip-text text-transparent">
-              Access Granted
-            </h1>
-            <p className="text-slate-400 mb-10 text-sm font-medium uppercase tracking-[0.2em]">ยืนยันตัวตนสำเร็จ</p>
-
-            {/* แสดงรูปภาพที่ถ่ายจากมือถือ */}
-            <div className="relative inline-block mb-10 group">
-              <div className="absolute -inset-1 bg-gradient-to-r from-green-500 to-emerald-600 rounded-[2.5rem] blur opacity-25 group-hover:opacity-50 transition duration-1000 group-hover:duration-200"></div>
-              <div className="relative w-48 h-48 rounded-[2.2rem] overflow-hidden border-2 border-white/10 bg-slate-800">
-                {capturedImage ? (
-                  <img src={capturedImage} alt="Captured Face" className="w-full h-full object-cover" />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center text-slate-600">
-                    <User size={64} />
+          {/* User Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            {users.length === 0 ? (
+              <div className="col-span-full py-20 text-center bg-slate-900/50 rounded-[3rem] border border-dashed border-white/10">
+                <User size={48} className="mx-auto mb-4 text-slate-700" />
+                <p className="text-slate-500">ยังไม่มีผู้ใช้ในระบบ กรุณากดลงทะเบียนใหม่</p>
+              </div>
+            ) : (
+              users.map((user) => (
+                <div 
+                  key={user.user_id}
+                  className="group bg-slate-900/80 border border-white/5 p-6 rounded-[2.5rem] hover:border-blue-500/50 transition-all hover:shadow-2xl hover:shadow-blue-500/5 cursor-pointer relative overflow-hidden"
+                  onClick={() => startVerification(user)}
+                >
+                  <div className="aspect-square rounded-[1.5rem] overflow-hidden mb-6 bg-slate-800 border border-white/5 shadow-inner">
+                    <img src={user.baseline_image} alt={user.user_id} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" />
                   </div>
-                )}
-              </div>
-              <div className="absolute -bottom-3 -right-3 bg-green-500 text-slate-950 p-2 rounded-xl shadow-xl">
-                <Fingerprint size={20} />
-              </div>
-            </div>
-
-            <div className="space-y-2 mb-8">
-              <div className="text-xs text-slate-500 font-mono">SESSION ID: {sessionId}</div>
-              {verifiedAt && (
-                <div className="text-xs text-slate-400">
-                  สแกนเมื่อ: {new Date(verifiedAt).toLocaleString('th-TH')}
+                  <h3 className="text-lg font-bold mb-1 truncate">ID: {user.user_id}</h3>
+                  <p className="text-[10px] text-slate-500 font-mono uppercase tracking-widest">
+                    Registered: {new Date(user.created_at).toLocaleDateString()}
+                  </p>
+                  
+                  <div className="mt-4 flex items-center gap-2 text-blue-400 text-xs font-bold opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Camera size={14} /> สแกนเพื่อยืนยันตัวตน
+                  </div>
                 </div>
-              )}
-            </div>
-
-            <button 
-              onClick={() => window.location.reload()}
-              className="px-8 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-sm font-medium transition-all"
-            >
-              เริ่มต้นใหม่
-            </button>
+              ))
+            )}
           </div>
         </div>
       </div>
     );
   }
 
-  // หน้าจอรอสแกน (มี QR Code)
+  // Session View (Waiting for Scan or Success)
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 text-white p-4 font-sans">
-      <div className="max-w-md w-full bg-slate-900/40 backdrop-blur-xl p-10 rounded-[3.5rem] border border-white/5 shadow-2xl text-center relative">
-        
-        {/* Glow Effects */}
-        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-32 h-32 bg-blue-600/20 blur-[80px] -z-10"></div>
-        <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-32 h-32 bg-indigo-600/20 blur-[80px] -z-10"></div>
+    <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6">
+      <div className="max-w-4xl w-full">
+        <button 
+          onClick={() => setView('dashboard')}
+          className="mb-8 flex items-center gap-2 text-slate-500 hover:text-white transition-colors"
+        >
+          <ArrowLeft size={18} /> กลับไปหน้าจัดการ
+        </button>
 
-        <div className="mb-10 inline-flex items-center gap-3 px-5 py-2 bg-blue-600/10 border border-blue-500/20 rounded-full">
-          <Smartphone size={16} className="text-blue-400" />
-          <span className="text-[10px] font-bold tracking-widest uppercase text-blue-400">Cross-Device Authentication</span>
-        </div>
-
-        <h1 className="text-3xl font-extrabold mb-3 tracking-tight">AI 3D Face ID</h1>
-        <p className="text-slate-500 mb-12 text-sm max-w-[280px] mx-auto leading-relaxed">
-          กรุณาใช้กล้องมือถือสแกนคิวอาร์โค้ดด้านล่าง เพื่อเริ่มต้นการสแกนใบหน้าแบบ 3 มิติ
-        </p>
-        
-        <div className="relative group mb-12">
-          <div className="absolute -inset-4 bg-gradient-to-tr from-blue-600/20 to-indigo-600/20 rounded-[3rem] blur-2xl opacity-50 group-hover:opacity-100 transition duration-1000"></div>
-          <div className="relative bg-white p-6 rounded-[2.5rem] inline-block shadow-2xl ring-1 ring-white/10 overflow-hidden">
-            {baseUrl && (
-              <QRCodeSVG 
-                value={`${baseUrl}/verify/${sessionId}`} 
-                size={220}
-                fgColor="#0f172a"
-                level="H"
-                includeMargin={false}
-              />
-            )}
-            <div className="absolute inset-0 bg-gradient-to-tr from-blue-600/5 to-transparent pointer-events-none"></div>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-center gap-3 text-blue-400 text-xs font-mono tracking-wider">
-          <Loader2 className="animate-spin" size={16} />
-          <span className="uppercase">Waiting for Mobile connection...</span>
-        </div>
-
-        <div className="mt-12 pt-8 border-t border-white/5 grid grid-cols-2 gap-4">
-          <div className="flex flex-col items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-slate-400">
-              <ShieldCheck size={16}/>
+        {status === 'verified' ? (
+          <div className="bg-slate-900/50 p-10 rounded-[3rem] border border-green-500/20 shadow-2xl animate-in zoom-in-95 duration-500">
+            <div className="text-center mb-10">
+              <div className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                <CheckCircle2 size={32} className="text-green-400" />
+              </div>
+              <h2 className="text-3xl font-bold">{isNewUser ? 'Registration Success' : 'Verification Success'}</h2>
+              <p className="text-slate-500">User ID: {selectedUserId}</p>
             </div>
-            <span className="text-[9px] uppercase tracking-tighter text-slate-500">Secure AES-256</span>
-          </div>
-          <div className="flex flex-col items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-slate-400">
-              <Fingerprint size={16}/>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              <div className="space-y-3">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">ภาพถ่ายตั้งต้น</span>
+                <div className="aspect-square rounded-3xl overflow-hidden border-2 border-white/5 bg-slate-800">
+                  <img src={baselineImage || capturedImage || ''} className="w-full h-full object-cover" />
+                </div>
+              </div>
+              <div className="space-y-3">
+                <span className="text-[10px] font-bold text-blue-500 uppercase tracking-widest">ภาพถ่ายล่าสุด</span>
+                <div className="aspect-square rounded-3xl overflow-hidden border-2 border-blue-500/30 bg-slate-800 shadow-[0_0_40px_rgba(59,130,246,0.1)]">
+                  <img src={capturedImage || ''} className="w-full h-full object-cover" />
+                </div>
+              </div>
             </div>
-            <span className="text-[9px] uppercase tracking-tighter text-slate-500">AI 3D Mapping</span>
+            
+            <button 
+              onClick={() => setView('dashboard')}
+              className="w-full mt-10 py-5 bg-white/5 hover:bg-white/10 rounded-2xl font-bold transition-all"
+            >
+              เสร็จสิ้นและกลับหน้าหลัก
+            </button>
           </div>
-        </div>
+        ) : (
+          <div className="bg-slate-900/80 p-12 rounded-[3.5rem] border border-white/5 text-center relative overflow-hidden shadow-2xl">
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-64 h-64 bg-blue-600/10 blur-[100px] -z-10"></div>
+            
+            <div className="mb-10">
+              <div className="inline-flex items-center gap-2 px-4 py-1.5 bg-blue-600/10 border border-blue-500/20 rounded-full text-blue-400 text-[10px] font-bold tracking-widest uppercase mb-4">
+                {isNewUser ? <UserPlus size={14}/> : <ShieldCheck size={14}/>}
+                {isNewUser ? 'New Enrollment' : 'Identity Verification'}
+              </div>
+              <h2 className="text-4xl font-black mb-2 tracking-tight">ID: {selectedUserId}</h2>
+              <p className="text-slate-500">ใช้มือถือของคุณสแกนเพื่อเริ่ม {isNewUser ? 'บันทึกใบหน้า' : 'ยืนยันตัวตน'}</p>
+            </div>
+
+            <div className="bg-white p-8 rounded-[3rem] inline-block mb-10 shadow-2xl ring-8 ring-blue-600/5">
+              {baseUrl && <QRCodeSVG value={`${baseUrl}/verify/${sessionId}`} size={240} />}
+            </div>
+
+            <div className="flex items-center justify-center gap-3 text-blue-500 text-xs font-mono animate-pulse uppercase tracking-[0.2em]">
+              <Loader2 className="animate-spin" size={16} />
+              <span>Awaiting Secure Connection...</span>
+            </div>
+          </div>
+        )}
       </div>
-      
-      <p className="mt-10 text-slate-600 text-[10px] uppercase tracking-[0.3em] font-medium">
-        Powered by Google MediaPipe & Supabase
-      </p>
     </div>
   );
 }
