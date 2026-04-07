@@ -34,12 +34,19 @@ export default function DesktopPage() {
           table: 'sessions', 
           filter: `id=eq.${sessionId}` 
         }, 
-        (payload) => {
-          console.log('Real-time update:', payload);
-          if (payload.new.is_verified) {
+        async (payload) => {
+          console.log('Real-time update detected, fetching full record...');
+          // เมื่อมีการอัปเดต ให้ดึงข้อมูลใหม่ทั้งหมดอีกครั้งเพื่อเลี่ยงปัญหา Payload ขนาดใหญ่
+          const { data } = await supabase
+            .from('sessions')
+            .select('*')
+            .eq('id', sessionId)
+            .single();
+
+          if (data && data.is_verified) {
+            setCapturedImage(data.face_image);
+            setVerifiedAt(data.verified_at);
             setStatus('verified');
-            setCapturedImage(payload.new.face_image);
-            setVerifiedAt(payload.new.verified_at);
           }
         }
       ).subscribe();
